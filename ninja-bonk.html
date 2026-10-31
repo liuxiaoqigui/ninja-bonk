@@ -5,265 +5,108 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <title>忍界幸存者</title>
 <style>
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #74ad55; touch-action: none; user-select: none; -webkit-user-select: none; }
-  canvas { display: block; width: 100vw; height: 100vh; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #74a334; touch-action: none; user-select: none; -webkit-user-select: none; }
+  canvas { display: block; width: 100vw; height: 100vh; image-rendering: pixelated; }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
+<!-- 美术、特效、字体都打包在 assets.js（python3 tools/build_assets.py 生成） -->
+<script src="assets.js"></script>
 <script>
 // ===== 画布 =====
 const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const PX = 3, FXP = 1.5; // 角色/道具 1 个美术像素 = 3 个世界单位；pixelfx 特效 1 像素 = 1.5
 let W, H, DPR, S, VW, VH;
 function resize() {
   DPR = Math.min(2, devicePixelRatio || 1);
   W = innerWidth; H = innerHeight;
   cv.width = W * DPR; cv.height = H * DPR;
-  S = Math.max(W, H) / 900; // 世界坐标 -> 屏幕像素，长边固定看到 900 单位，手机电脑难度一致
+  // 长边大约看到 900 世界单位，并且让 1.5 个世界单位刚好是整数个屏幕像素，像素才整齐
+  const n = Math.max(1, Math.round(FXP * Math.max(W, H) / 900 * DPR));
+  S = n / (FXP * DPR);
   VW = W / S; VH = H / S;
 }
 addEventListener('resize', resize); resize();
 
-const FONT = '-apple-system,"PingFang SC","Microsoft YaHei",sans-serif';
+const FONT = 'FusionPixel';
 const TAU = Math.PI * 2;
 const rand = (a, b) => a + Math.random() * (b - a);
 const fmt = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 const dist2 = (a, b) => (a.x - b.x) ** 2 + (a.y - b.y) ** 2;
 const shuffle = a => { for (let i = a.length - 1; i > 0; i--) { const j = Math.random() * (i + 1) | 0; [a[i], a[j]] = [a[j], a[i]]; } return a; };
 
-// ===== SVG 美术：启动时栅格化到离屏 canvas，每帧只 drawImage，几百只怪也不卡 =====
-const RES = 4; // 每个世界单位 4 像素，高清屏放大也清楚
-function sprite(vb, size, body) { // size = 默认绘制高度（世界单位）
-  const [, , w, h] = vb.split(' ').map(Number);
-  const c = document.createElement('canvas'), hit = document.createElement('canvas');
-  c.width = hit.width = Math.ceil(size * RES * w / h); c.height = hit.height = size * RES;
-  c.size = size; c.aspect = w / h; c.hit = hit;
-  const img = new Image();
-  img.onload = () => {
-    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
-    const x = hit.getContext('2d'); // 受击闪红版
-    x.drawImage(c, 0, 0); x.globalCompositeOperation = 'source-atop';
-    x.fillStyle = 'rgba(255,60,60,.6)'; x.fillRect(0, 0, hit.width, hit.height);
-  };
-  img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="${vb}">${body}</svg>`);
+// ===== 像素美术：Ninja Adventure 素材 + 运行时换色 =====
+const IMG = {}, ART = {};
+const loadImg = k => new Promise((ok, no) => { const i = new Image(); i.onload = () => ok(i); i.onerror = no; i.src = ASSETS[k]; });
+function canvasOf(img) { const c = document.createElement('canvas'); c.width = img.width; c.height = img.height; c.getContext('2d').drawImage(img, 0, 0); return c; }
+// 逐像素改色：fn(r, g, b) 返回新颜色，返回空就不改；描边色 #141b1b 永远不动
+function tint(img, fn) {
+  const c = canvasOf(img), x = c.getContext('2d'), id = x.getImageData(0, 0, c.width, c.height), d = id.data;
+  for (let i = 0; i < d.length; i += 4) {
+    if (!d[i + 3] || (d[i] === 20 && d[i + 1] === 27 && d[i + 2] === 27)) continue;
+    const v = fn(d[i], d[i + 1], d[i + 2]);
+    if (v) [d[i], d[i + 1], d[i + 2]] = v;
+  }
+  x.putImageData(id, 0, 0); return c;
+}
+const hex = s => [1, 3, 5].map(i => parseInt(s.slice(i, i + 2), 16));
+const swap = map => { const M = new Map(Object.entries(map).map(([a, b]) => [hex(a).join(), hex(b)])); return (r, g, b) => M.get(`${r},${g},${b}`); };
+// 精灵表：每帧 fw×fh，附带一张全白的受击版
+const sheet = (c, fw, fh = fw) => ({ c, flash: tint(c, (r, g, b) => [r + (255 - r) * 0.7, g + (255 - g) * 0.7, b + (255 - b) * 0.7]), fw, fh, cols: Math.floor(c.width / fw) });
+
+// 主角和晓成员都用素材包的 Boy 改色：头发 #d14b34/#965340，皮肤 #ef914f，衣服 #548789
+const HERO = {
+  naruto: { '#d14b34': '#ffd23f', '#965340': '#d99a1c', '#548789': '#f37b1d', '#2e3939': '#26262e', '#51614e': '#2c4a9a' },
+  sasuke: { '#d14b34': '#2b3152', '#965340': '#191c30', '#548789': '#2a3550', '#e3f1f5': '#e9e9ee' },
+  sakura: { '#d14b34': '#ff9ec7', '#965340': '#d9679b', '#548789': '#d9324a', '#2e3939': '#3a3f4a' },
+};
+const CLOAK = { '#548789': '#1b1a22', '#e3f1f5': '#d7262e', '#2e3939': '#0e0d12', '#51614e': '#d7262e' }; // 黑袍红云
+const AKA = {
+  '迪达拉': { ...CLOAK, '#d14b34': '#ffd84d', '#965340': '#d9a520' },
+  '干柿鬼鲛': { ...CLOAK, '#d14b34': '#2c4f86', '#965340': '#1d3560', '#ef914f': '#7fa3c4' },
+  '角都': { ...CLOAK, '#d14b34': '#3e4656', '#965340': '#2a303c', '#ef914f': '#a77c55' },
+  '飞段': { ...CLOAK, '#d14b34': '#d3d9e2', '#965340': '#9aa3b0', '#ef914f': '#f3cdb0' },
+  '佩恩': { ...CLOAK, '#d14b34': '#e8752a', '#965340': '#b0501a' },
+};
+
+// 地面：用草地格子随机拼一大块，再平铺
+function makeGround() {
+  const floor = IMG['sprites/floor'], det = IMG['sprites/floor-detail'], N = 24;
+  const c = document.createElement('canvas'); c.width = c.height = N * 16;
+  const x = c.getContext('2d');
+  let seed = 7; const rnd = () => (seed = seed * 16807 % 2147483647) / 2147483647;
+  for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
+    const col = rnd() < 0.55 ? 11 : 12 + Math.floor(rnd() * 4); // 第 12 行第 11~15 格是绿草
+    x.drawImage(floor, col * 16, 12 * 16, 16, 16, i * 16, j * 16, 16, 16);
+    if (rnd() < 0.08) x.drawImage(det, Math.floor(rnd() * 8) * 16, 32, 16, 16, i * 16, j * 16, 16, 16); // 草丛、小花
+  }
   return c;
 }
 
-const L = 'stroke="#1a1410" stroke-width="1.8" stroke-linejoin="round"'; // 统一描边
-const LEAF = '<path d="M29.5 17.8q2.5-3.4 5 0q-1.5 2.5-3.5 1" fill="none" stroke-width="1.1"/>';
-
-// Q 版忍者模板：同一个身体，换头发、衣服、眼睛
-const kid = ({ size = 60, hair, back = '', skin = '#ffd9a8', iris, top, arm = top, pants, shoes = '#2f5bb5', collar = '', mark = LEAF, mouth = 'M28.5 35Q32 38.5 35.5 35', extra = '' }) => sprite('0 0 64 64', size, `
-  <g ${L}>
-    ${back}
-    <rect x="22" y="49" width="8" height="10" rx="3" fill="${pants}"/><rect x="34" y="49" width="8" height="10" rx="3" fill="${pants}"/>
-    <rect x="21" y="57.5" width="10" height="4.5" rx="2.2" fill="${shoes}"/><rect x="33" y="57.5" width="10" height="4.5" rx="2.2" fill="${shoes}"/>
-    <rect x="13" y="39" width="8" height="12" rx="4" fill="${arm}" transform="rotate(18 17 45)"/>
-    <rect x="43" y="39" width="8" height="12" rx="4" fill="${arm}" transform="rotate(-18 47 45)"/>
-    <circle cx="14.5" cy="50.5" r="3" fill="${skin}"/><circle cx="49.5" cy="50.5" r="3" fill="${skin}"/>
-    <path d="M19 44Q19 37 26 37H38Q45 37 45 44V52Q32 55 19 52Z" fill="${top}"/>
-    ${collar}
-    <circle cx="32" cy="25" r="16" fill="${skin}"/>
-    ${hair}
-    <path d="M15.5 17Q32 11 48.5 17L49 23Q32 17 15 23Z" fill="#2c4a9a"/>
-    <rect x="25" y="13" width="14" height="8" rx="1.5" fill="#d3dbe6"/>
-    ${mark}
-  </g>
-  <g stroke="#1a1410" stroke-width="1"><ellipse cx="26" cy="28" rx="2.5" ry="3.3" fill="${iris}"/><ellipse cx="38" cy="28" rx="2.5" ry="3.3" fill="${iris}"/></g>
-  <circle cx="26.8" cy="26.8" r="1" fill="#fff"/><circle cx="38.8" cy="26.8" r="1" fill="#fff"/>
-  <path d="${mouth}" fill="none" stroke="#1a1410" stroke-width="1.3" stroke-linecap="round"/>
-  ${extra}`);
-
-// 晓：黑袍红云 + 高领遮住下半张脸，头发和眼睛各不相同
-const cloud = (x, y, s = 1) => `<path transform="translate(${x} ${y}) scale(${s})" d="M-8 2Q-10-3-5-3Q-4-8 1-6Q4-9 7-5Q11-4 9 1Q9 5 4 3.5Q1 6-3 3.5Q-7 5-8 2Z" fill="#d7262e" stroke="#fff" stroke-width="1.3"/>`;
-const eyes = (iris, sclera = '#fff') => `<g stroke="#1a1410" stroke-width="1"><ellipse cx="34.5" cy="26" rx="2.8" ry="2.3" fill="${sclera}"/><ellipse cx="45.5" cy="26" rx="2.8" ry="2.3" fill="${sclera}"/></g><circle cx="35" cy="26.2" r="1.5" fill="${iris}"/><circle cx="45" cy="26.2" r="1.5" fill="${iris}"/><path d="M31 22.3 37.6 23.8M49 22.3 42.4 23.8" stroke="#1a1410" stroke-width="1.5" stroke-linecap="round"/>`;
-const akatsuki = (skin, { behind = '', hairBack = '', face, front = '' }) => sprite('0 0 80 80', 120, `
-  ${behind}
-  <ellipse cx="31" cy="76" rx="5.5" ry="2.8" fill="#2b2a33" ${L}/><ellipse cx="49" cy="76" rx="5.5" ry="2.8" fill="#2b2a33" ${L}/>
-  <path d="M22 44Q22 38 30 38H50Q58 38 58 44L62 74Q40 77 18 74Z" fill="#1b1a22" ${L}/>
-  <path d="M40 46V75" stroke="#34323f" stroke-width="1.5"/>
-  ${cloud(36, 55)}${cloud(48, 65)}${cloud(33, 69, .75)}
-  <path d="M24 41Q14 47 13 63L21 64Q22 54 28 49Z" fill="#1b1a22" ${L}/><path d="M56 41Q66 47 67 63L59 64Q58 54 52 49Z" fill="#1b1a22" ${L}/>
-  ${cloud(18, 56, .55)}${cloud(62, 56, .55)}
-  <circle cx="17" cy="66" r="3.4" fill="${skin}" ${L}/><circle cx="63" cy="66" r="3.4" fill="${skin}" ${L}/>
-  ${hairBack}
-  <circle cx="40" cy="25" r="14" fill="${skin}" ${L}/>
-  <path d="M23 43Q22 33 28 31Q40 38 52 31Q58 33 57 43Q40 47 23 43Z" fill="#1b1a22" ${L}/>
-  <path d="M28.5 32Q40 38.6 51.5 32" fill="none" stroke="#b3202a" stroke-width="1.6"/>
-  ${face}${front}`);
-
-// 白绝身体，普通版和自爆版共用
-const ZETSU = `
-  <g stroke="#4a4f57" stroke-width="1.8" stroke-linejoin="round">
-    <rect x="23" y="49" width="7" height="10" rx="3.5" fill="#eceee8"/><rect x="34" y="49" width="7" height="10" rx="3.5" fill="#eceee8"/>
-    <rect x="13" y="40" width="7" height="12" rx="3.5" fill="#eceee8" transform="rotate(22 16 46)"/>
-    <rect x="44" y="40" width="7" height="12" rx="3.5" fill="#eceee8" transform="rotate(-22 48 46)"/>
-    <path d="M19 45Q19 37 32 37Q45 37 45 45V52Q32 56 19 52Z" fill="#f6f7f2"/>
-    <path d="M32 6V9" fill="none"/>
-    <circle cx="32" cy="24" r="16" fill="#fbfcf8"/>
-    <path d="M32 6Q27 0 21 2Q25 8 32 6Z" fill="#79c257"/><path d="M32 6Q37-1 43 2Q39 8 32 6Z" fill="#8fd16a"/>
-  </g>
-  <path d="M17.5 28Q32 44 46.5 28Q44 39 32 40Q20 39 17.5 28Z" fill="#e6e9df"/>
-  <g stroke="#3a3a3a" stroke-width="1.2"><ellipse cx="25.5" cy="23" rx="3.2" ry="3.8" fill="#f2c623"/><ellipse cx="38.5" cy="23" rx="3.2" ry="3.8" fill="#f2c623"/></g>
-  <circle cx="26" cy="23.5" r="1.4" fill="#1e1e1e"/><circle cx="39" cy="23.5" r="1.4" fill="#1e1e1e"/>
-  <path d="M23 30Q32 37 41 30Q32 33.5 23 30Z" fill="#3b2626" stroke="#3b2626" stroke-width="1.2" stroke-linejoin="round"/>`;
-const TAG = '<rect x="-5.5" y="-9.5" width="11" height="19" rx="1" fill="#f3e6c4" stroke="#7a5a2a" stroke-width="1"/><path d="M0-7V7M-3-4h6M-3 3h6" stroke="#c0392b" stroke-width="1.3"/><circle r="2.5" fill="none" stroke="#c0392b" stroke-width="1"/>';
-const ORB_GRAD = `<defs><radialGradient id="g"><stop offset="0" stop-color="#fff"/><stop offset=".4" stop-color="#a8e0ff"/>
-  <stop offset=".75" stop-color="#3fa3ff" stop-opacity=".7"/><stop offset="1" stop-color="#3fa3ff" stop-opacity="0"/></radialGradient></defs>`;
-
-const grass = [[30, 40], [110, 30], [220, 90], [140, 120], [40, 140], [200, 220], [100, 230], [236, 34], [80, 100], [170, 200], [22, 236], [130, 180], [60, 60], [190, 140]]
-  .map(([x, y]) => `M${x} ${y}l-3-7M${x} ${y}v-9M${x} ${y}l3-7`).join('');
-
-const ART = {
-  naruto: kid({
-    hair: '<path d="M15.5 21 13 31 19 26.5ZM48.5 21 51 31 45 26.5Z" fill="#ffd23f"/><path d="M15 22 8 15 15 13 11 6 20 8 22 1 29 6 35 1 39 7 46 3 46 11 55 13 49 22Q32 11 15 22Z" fill="#ffd23f"/>',
-    iris: '#2a66d9', top: '#f78a1d', pants: '#f07c1c', collar: '<path d="M24 37.5 32 45 40 37.5Z" fill="#26262e"/>',
-    extra: '<path d="M32 45V53.5" stroke="#fff" stroke-width="1.3"/><path d="M18 31l4 .8M18 33.5l4 .3M18.5 36l3.5-.6M46 31l-4 .8M46 33.5l-4 .3M45.5 36l-3.5-.6" stroke="#9c5a32" stroke-width="1" stroke-linecap="round"/>',
-  }),
-  sasuke: kid({
-    hair: '<path d="M15.5 20Q12 33 17 38L20 26ZM48.5 20Q52 33 47 38L44 26Z" fill="#1f2440"/><path d="M15 22 9 14 17 12 14 4 24 8 28 1 34 7 44 1 45 9 56 7 51 15 54 22Q32 10 15 22Z" fill="#1f2440"/>',
-    iris: '#222', top: '#2a3550', arm: '#e9e9ee', pants: '#e9e9ee', mouth: 'M29 35.5H35',
-    collar: '<path d="M22 38Q32 42 42 38L41 35Q32 38 23 35Z" fill="#2a3550"/>',
-  }),
-  sakura: kid({
-    back: '<path d="M13 28Q11 6 32 6Q53 6 51 28L53 47 44 45 44 32H20L20 45 11 47Z" fill="#ff9ec7"/>',
-    hair: '<path d="M16 23Q16 9 32 9Q48 9 48 23Q44 16 39 19Q36 14 32 18Q28 14 25 19Q20 16 16 23Z" fill="#ff9ec7"/>',
-    iris: '#2f9a62', top: '#d9324a', arm: '#ffd9a8', pants: '#3a3f4a',
-  }),
-  // 音忍：站远处扔苦无
-  sound: kid({
-    size: 50, hair: '<path d="M16 22 13 13 20 14 21 7 28 11 32 5 36 11 43 7 44 14 51 13 48 22Q32 12 16 22Z" fill="#4a3b2e"/>',
-    iris: '#3b2a20', top: '#8a8f7a', pants: '#5d6152', shoes: '#3b3b3b', mouth: 'M28.5 37Q32 34.5 35.5 37',
-    mark: '<path d="M33.5 14.5v5M33.5 14.5l2.5 1.2" fill="none" stroke-width="1.1"/><circle cx="32.3" cy="19.5" r="1.3" fill="#1a1410" stroke-width=".5"/>',
-  }),
-  // 白绝：光头白小人，头顶一片小芽，黄眼咧嘴笑
-  zetsu: sprite('0 0 64 64', 90, ZETSU),
-  // 自爆白绝：肚子上贴着起爆符
-  bomber: sprite('0 0 64 64', 50, ZETSU + `<g transform="translate(32 46) scale(.7)">${TAG}</g><path d="M21 17 29 20M43 17 35 20" stroke="#3a3a3a" stroke-width="1.6" stroke-linecap="round"/>`),
-  // 忍犬：画的是朝左
-  dog: sprite('0 0 64 64', 40, `
-    <path d="M52 36Q61 30 58 21" fill="none" stroke="#1a1410" stroke-width="5.5" stroke-linecap="round"/>
-    <path d="M52 36Q61 30 58 21" fill="none" stroke="#b07a45" stroke-width="2.5" stroke-linecap="round"/>
-    <g ${L}>
-      <rect x="21" y="42" width="6" height="13" rx="3" fill="#a06a3a"/><rect x="29" y="43" width="6" height="12" rx="3" fill="#8a5a30"/>
-      <rect x="41" y="43" width="6" height="12" rx="3" fill="#8a5a30"/><rect x="48" y="42" width="6" height="13" rx="3" fill="#a06a3a"/>
-      <ellipse cx="38" cy="38" rx="18" ry="10" fill="#b07a45"/>
-      <path d="M12 22 9 10 19 17ZM25 18 29 8 31 19Z" fill="#6e4524"/>
-      <circle cx="20" cy="28" r="11" fill="#b07a45"/>
-      <ellipse cx="11.5" cy="32" rx="6.5" ry="4.8" fill="#ead2ad"/>
-      <path d="M13 20Q20 16 28 20L28 24Q20 20 13 24Z" fill="#2c4a9a"/>
-    </g>
-    <circle cx="6.5" cy="30.5" r="2.2" fill="#1a1410"/><circle cx="18" cy="26.5" r="1.8" fill="#1a1410"/><circle cx="18.6" cy="25.9" r=".6" fill="#fff"/>
-    <path d="M8 35Q11 37 14 35" fill="none" stroke="#1a1410" stroke-width="1.1" stroke-linecap="round"/>`),
-
-  star: sprite('-12 -12 24 24', 22, `
-    <path d="M0-11 3-3 11 0 3 3 0 11-3 3-11 0-3-3Z" fill="#5f6b7a" stroke="#1d2229" stroke-width="1"/>
-    <path d="M0-11 3-3 0 0ZM11 0 3 3 0 0ZM0 11-3 3 0 0ZM-11 0-3-3 0 0Z" fill="#a5b2c2"/>
-    <circle r="2.2" fill="#1d2229"/>`),
-  orb: sprite('-20 -20 40 40', 48, `${ORB_GRAD}
-    <circle r="20" fill="url(#g)"/>
-    <g fill="none" stroke="#f0faff" stroke-width="1.6" stroke-linecap="round">
-      <path d="M-11-4A11 11 0 0 1 8-8"/><path d="M11 4A11 11 0 0 1-8 8"/><path d="M-4 11A11 11 0 0 1-9-6"/><path d="M4-11A11 11 0 0 1 9 6"/>
-    </g>`),
-  // 风遁·螺旋手里剑
-  rsk: sprite('-24 -24 48 48', 60, `${ORB_GRAD}
-    <g fill="#eaf8ff" stroke="#7fc8ff" stroke-width="1"><path d="M0-6Q14-22 24-24Q12-12 6 0Z"/><path d="M6 0Q22 14 24 24Q12 12 0 6Z"/><path d="M0 6Q-14 22-24 24Q-12 12-6 0Z"/><path d="M-6 0Q-22-14-24-24Q-12-12 0-6Z"/></g>
-    <circle r="11" fill="url(#g)"/><circle r="5" fill="#fff"/>`),
-  fire: sprite('-16 -10 32 20', 28, `
-    <defs><radialGradient id="f" cx=".65" cy=".5" r=".6"><stop offset="0" stop-color="#fff6c0"/><stop offset=".4" stop-color="#ffb02e"/><stop offset="1" stop-color="#ff4a1a" stop-opacity="0"/></radialGradient></defs>
-    <path d="M-16 0Q-6-9 6-8Q15-6 15 0Q15 6 6 8Q-6 9-16 0Z" fill="url(#f)"/><circle cx="6" r="5" fill="#fff3b0"/>`),
-  tag: sprite('-6 -10 12 20', 24, TAG),
-  kunai: sprite('-12 -5 24 10', 10, `
-    <path d="M1-3.5 12 0 1 3.5Z" fill="#9aa7b8" stroke="#1d2229" stroke-width="1"/>
-    <rect x="-7" y="-1.4" width="8" height="2.8" fill="#3a2a20" stroke="#1d2229" stroke-width=".8"/>
-    <circle cx="-9" r="2.2" fill="none" stroke="#1d2229" stroke-width="1.2"/>`),
-  bird: sprite('-12 -10 24 20', 24, `
-    <g stroke="#5a5a5a" stroke-width="1.2" stroke-linejoin="round"><path d="M-10-1Q-4-9 2-2Q4-8 9-3L12 0 8 2Q0 8-8 4Z" fill="#f4f1ea"/><path d="M-3-2Q-6-10 2-9Q2-5-1-1Z" fill="#e6e1d6"/></g>
-    <circle cx="7" cy="-1" r="1" fill="#222"/>`),
-  shark: sprite('-14 -8 28 16', 26, `
-    <g stroke="#123a66" stroke-width="1.2" stroke-linejoin="round"><path d="M-13 0-9-6-7-1Q0-8 8-4Q13-2 13 1Q8 5 0 5Q-6 5-7 1L-9 6Z" fill="#4a8fd8"/><path d="M-1-5 2-9 4-4Z" fill="#4a8fd8"/></g>
-    <path d="M3 1.5H11" stroke="#fff" stroke-width="1.2"/><circle cx="8" cy="-1" r="1" fill="#111"/>`),
-  gem: sprite('-8 -10 16 20', 22, `
-    <path d="M0-9 7-2 0 9-7-2Z" fill="#3aa0ff" stroke="#16457d" stroke-width="1.2" stroke-linejoin="round"/>
-    <path d="M0-9 3.5-2 0 9-3.5-2Z" fill="#8fd3ff"/><path d="M-7-2H7" stroke="#16457d" stroke-width=".8"/>
-    <path d="M-2-6-4-2.5" stroke="#fff" stroke-width="1.2" stroke-linecap="round"/>`),
-  gold: sprite('-8 -10 16 20', 32, `
-    <path d="M0-9 7-2 0 9-7-2Z" fill="#ffc83a" stroke="#8a5a0c" stroke-width="1.2" stroke-linejoin="round"/>
-    <path d="M0-9 3.5-2 0 9-3.5-2Z" fill="#ffeaa0"/><path d="M-7-2H7" stroke="#8a5a0c" stroke-width=".8"/>
-    <path d="M-2-6-4-2.5" stroke="#fff" stroke-width="1.2" stroke-linecap="round"/>`),
-  ramen: sprite('-12 -12 24 24', 30, `
-    <path d="M-3-11 6-2M0-11 8-3" stroke="#8a5a2a" stroke-width="1.3" stroke-linecap="round"/>
-    <path d="M-11-1H11Q10 9 0 10Q-10 9-11-1Z" fill="#d93a2b" stroke="#5a1a10" stroke-width="1.2"/>
-    <ellipse cy="-1" rx="11" ry="3" fill="#f5d27a" stroke="#5a1a10" stroke-width="1.2"/>
-    <path d="M-7-1q2-2 4 0t4 0t4 0" fill="none" stroke="#e0a83a" stroke-width="1"/>
-    <circle cx="5" cy="-1.5" r="2" fill="#fff" stroke="#e86a9a" stroke-width=".8"/><path d="M-6 4h12" stroke="#fff" stroke-width="1"/>`),
-  chest: sprite('-12 -12 24 24', 34, `
-    <g stroke="#4a2a10" stroke-width="1.3" stroke-linejoin="round"><rect x="-10" y="-3" width="20" height="12" rx="1" fill="#b5702d"/><path d="M-10-3Q-10-10 0-10Q10-10 10-3Z" fill="#c98a3e"/></g>
-    <path d="M-10-3H10M-6-9.5V9M6-9.5V9" stroke="#f0c040" stroke-width="2"/>
-    <rect x="-2" y="-5" width="4" height="5" rx=".8" fill="#f0c040" stroke="#4a2a10" stroke-width="1"/>`),
-
-  // 卡片图标
-  bolt: sprite('-12 -12 24 24', 40, '<path d="M3-11-7 1H-1L-4 11 7-2H1Z" fill="#ffe14d" stroke="#3a6fd8" stroke-width="1.4" stroke-linejoin="round"/>'),
-  boot: sprite('-12 -12 24 24', 40, '<path d="M-9 3Q-9-3-3-4L1-9 5-8 4-3Q10-2 10 4V7H-9Z" fill="#2f5bb5" stroke="#16306a" stroke-width="1.3" stroke-linejoin="round"/><path d="M-9 7H10" stroke="#16306a" stroke-width="2"/>'),
-  heart: sprite('-12 -12 24 24', 40, `
-    <path d="M0 9C-14 0-9-11 0-4C9-11 14 0 0 9Z" fill="#ff4d5e" stroke="#7a1420" stroke-width="1.5" stroke-linejoin="round"/>
-    <path d="M-6-4q2-3 4-1" stroke="#fff" stroke-width="1.5" fill="none" stroke-linecap="round"/>`),
-  scroll: sprite('-12 -12 24 24', 40, `
-    <rect x="-8" y="-7" width="16" height="14" rx="1" fill="#f3e2b3" stroke="#5a3b1a" stroke-width="1.3"/>
-    <rect x="-10.5" y="-9" width="4" height="18" rx="2" fill="#c0392b" stroke="#5a3b1a" stroke-width="1.3"/>
-    <rect x="6.5" y="-9" width="4" height="18" rx="2" fill="#c0392b" stroke="#5a3b1a" stroke-width="1.3"/>
-    <path d="M-4-3h8M-4 0h6M-4 3h7" stroke="#5a3b1a" stroke-width="1.1" stroke-linecap="round"/>`),
-  leaf: sprite('-12 -12 24 24', 40, `
-    <path d="M-9 8Q-10-8 9-9Q8 8-9 8Z" fill="#5cbf4a" stroke="#1f5c1a" stroke-width="1.3" stroke-linejoin="round"/>
-    <path d="M-9 8 5-5" stroke="#1f5c1a" stroke-width="1.1" stroke-linecap="round"/>`),
-
-  // 地面：一块 256 的草地，平铺成无限大
-  ground: sprite('0 0 256 256', 256, `
-    <rect width="256" height="256" fill="#74ad55"/>
-    <g fill="#80b961" opacity=".8"><ellipse cx="60" cy="70" rx="40" ry="22"/><ellipse cx="190" cy="170" rx="46" ry="26"/><ellipse cx="170" cy="50" rx="24" ry="14"/><ellipse cx="70" cy="200" rx="30" ry="16"/></g>
-    <path d="${grass}" fill="none" stroke="#5a9440" stroke-width="2.2" stroke-linecap="round"/>
-    <g fill="#fff"><circle cx="150" cy="80" r="3"/><circle cx="60" cy="170" r="3"/><circle cx="222" cy="140" r="3"/><circle cx="30" cy="90" r="3"/></g>
-    <g fill="#ffd23f"><circle cx="150" cy="80" r="1.3"/><circle cx="60" cy="170" r="1.3"/><circle cx="222" cy="140" r="1.3"/><circle cx="30" cy="90" r="1.3"/></g>
-    <g fill="#9aa39a" stroke="#6f786f" stroke-width="1"><ellipse cx="115" cy="150" rx="5" ry="3.5"/><ellipse cx="190" cy="110" rx="4" ry="3"/><ellipse cx="45" cy="215" rx="4.5" ry="3"/></g>`),
-
-  '迪达拉': akatsuki('#ffd9b0', {
-    hairBack: `<path d="M24 27Q21 9 40 8.5Q59 9 56 27Q59 37 57 46L50 44Q52 36 50 31H30Q28 36 30 44L23 46Q21 37 24 27Z" fill="#ffd84d" ${L}/>`,
-    face: eyes('#3c7bd9'),
-    front: `<path d="M35 12Q38 1 47 4Q43 8 44 13Z" fill="#ffd84d" ${L}/>
-      <path d="M26 23Q26 11 40 10.5Q54 11 54 23Q51 16 46 18Q44 13.5 40 16Q36 13 33 17Q29 15 26 23Z" fill="#ffd84d" ${L}/>
-      <path d="M41 12Q56 13 54 35Q50 30 47 34Q46 23 40 17Z" fill="#f4c73a" ${L}/>`,
-  }),
-  '干柿鬼鲛': akatsuki('#8db0cf', {
-    behind: `<g transform="rotate(28 60 34)"><rect x="54" y="4" width="12" height="38" rx="6" fill="#4d6f96" ${L}/>
-      <path d="M54 12h12M54 19h12M54 26h12M54 33h12" stroke="#ece4cc" stroke-width="2.5"/>
-      <rect x="57.5" y="41" width="5" height="10" rx="1" fill="#6b4a2b" ${L}/></g>`,
-    face: eyes('#222') + `<path d="M28 28.5l3 .8M28 31l3 .4M52 28.5l-3 .8M52 31l-3 .4" stroke="#4d6f96" stroke-width="1.2" stroke-linecap="round"/>`,
-    front: `<path d="M26 21 23 9 30 13 32 3 37.5 11 42 2 45.5 11 52 4 50.5 14 58 12 54 22Q40 13 26 21Z" fill="#2c4f86" ${L}/>`,
-  }),
-  '角都': akatsuki('#c49a6c', {
-    face: eyes('#3fd16a', '#c8262e'),
-    front: `<path d="M24 33Q22 8 40 8Q58 8 56 33L53 31Q54 24 54 22Q40 18 26 22Q26 24 27 31Z" fill="#3e4656" ${L}/>
-      <path d="M25.5 29Q40 33.5 54.5 29L55 34Q40 39 25 34Z" fill="#3e4656" ${L}/>`,
-  }),
-  '飞段': akatsuki('#f3dfcc', {
-    behind: `<path d="M10 74 62 6" stroke="#1a1410" stroke-width="5" stroke-linecap="round"/><path d="M10 74 62 6" stroke="#7a5230" stroke-width="2.6" stroke-linecap="round"/>
-      <path d="M58 11Q72 6 77 19Q68 13 60 15Z" fill="#d42a2a" ${L}/>
-      <path d="M54.5 16Q68 15 70 28Q63 20 56 20.5Z" fill="#d42a2a" ${L}/>
-      <path d="M51 21Q63 24 63 36Q57 28 52 26Z" fill="#d42a2a" ${L}/>`,
-    face: eyes('#b03a8a'),
-    front: `<path d="M26 22Q25 9 40 9Q55 9 54 22Q50 14 40 14Q30 14 26 22Z" fill="#d3d9e2" ${L}/>
-      <path d="M33 11.5Q36 14 34.5 18M40 10.5V15.5M47 11.5Q44 14 45.5 18" stroke="#98a2b0" stroke-width="1" fill="none"/>`,
-  }),
-  '佩恩': akatsuki('#f2d0a6', {
-    face: `<rect x="28" y="15.5" width="24" height="5" rx="1.2" fill="#c3ccd8" ${L}/><path d="M33 18h14" stroke="#1a1410" stroke-width="1"/>`
-      + eyes('#7a68a8', '#d9cdf0')
-      + `<g fill="none" stroke="#6a5a98" stroke-width=".6"><circle cx="34.5" cy="26" r="2.1"/><circle cx="45.5" cy="26" r="2.1"/></g>
-      <g fill="#9aa3ad" stroke="#1a1410" stroke-width=".5"><circle cx="38.3" cy="29.5" r=".9"/><circle cx="41.7" cy="29.5" r=".9"/>
-      <circle cx="26.5" cy="24" r=".9"/><circle cx="26.5" cy="27" r=".9"/><circle cx="53.5" cy="24" r=".9"/><circle cx="53.5" cy="27" r=".9"/></g>`,
-    front: `<path d="M25 21 20 13 27.5 13.5 25 5 33 9.5 36 1.5 41.5 8.5 46.5 2.5 48 10.5 56 7.5 53.5 15 59 18 54.5 21Q40 12 25 21Z" fill="#e8752a" ${L}/>`,
-  }),
-};
-ART.dog.left = true;
+function buildArt() {
+  const hero = IMG['sprites/hero'], gem = IMG['sprites/gem'];
+  for (const [id, map] of Object.entries({ ...HERO, ...AKA })) ART[id] = sheet(tint(hero, swap(map)), 16);
+  ART.zetsu = sheet(tint(IMG['sprites/zetsu'], swap({ '#d14b34': '#6fb84a', '#d3a2c0': '#d9ddd2' })), 16);
+  ART.sound = sheet(canvasOf(IMG['sprites/sound']), 16);
+  ART.bomb = sheet(canvasOf(IMG['sprites/bomber']), 16);
+  ART.dog = sheet(canvasOf(IMG['sprites/dog']), 16);
+  ART.bird = sheet(tint(IMG['sprites/bird'], (r, g, b) => { const v = 170 + (r + g + b) / 9; return [v, v * 0.97, v * 0.88]; }), 16); // 黏土鸟：白色
+  ART.shark = sheet(tint(IMG['sprites/shark'], (r, g, b) => [r * 0.3, g * 0.55 + 20, Math.min(255, b * 0.9 + 40)]), 16); // 水鲛：蓝色
+  ART.shuriken = sheet(canvasOf(IMG['sprites/shuriken']), 16);
+  ART.rsk = sheet(canvasOf(IMG['sprites/bigshuriken']), 23);
+  ART.kunai = sheet(canvasOf(IMG['sprites/kunai']), 14, 5);
+  ART.ramen = sheet(canvasOf(IMG['sprites/ramen']), 16);
+  ART.scroll = sheet(canvasOf(IMG['sprites/scroll']), 14);
+  ART.chest = sheet(canvasOf(IMG['sprites/chest']), 16);
+  ART.dynamite = sheet(canvasOf(IMG['sprites/dynamite']), 16);
+  ART.flame = sheet(canvasOf(IMG['sprites/flame']), 25, 30);
+  ART.gem = sheet(tint(gem, (r, g, b) => [r * 0.3, Math.min(255, g * 0.8 + 50), Math.min(255, b * 1.2 + 40)]), 16); // 蓝 = 1 点经验
+  ART.gemBig = sheet(canvasOf(gem), 16); // 紫 = 2~5 点
+  ART.gold = sheet(tint(gem, (r, g, b) => [Math.min(255, r * 1.2 + 70), Math.min(255, g * 1.1 + 60), b * 0.3]), 16); // 金 = Boss
+  ART.ground = makeGround();
+  IMG['fx/orb'] = tint(IMG['fx/orb'], (r, g, b) => [g, r * 0.6 + g * 0.4, b]); // arcane-orb 原本是紫的，换成螺旋丸的蓝
+}
 
 // ===== 角色 =====
 const CHARS = [
@@ -274,25 +117,25 @@ const CHARS = [
 
 // ===== 忍术（武器）、被动道具、进化 =====
 const WEAPONS = {
-  shuriken: { name: '手里剑', icon: 'star', desc: '自动瞄准最近的敌人', up: ['', '数量 +1', '伤害 +30%', '数量 +1', '数量 +1，可穿透'] },
-  rasengan: { name: '螺旋丸', icon: 'orb', desc: '绕着身体转的查克拉球', up: ['', '数量 +1', '转圈范围变大', '数量 +1', '数量 +1，伤害 +50%'] },
-  chidori: { name: '千鸟', icon: 'bolt', desc: '闪电在敌人之间连锁弹跳', up: ['', '多弹 1 次', '冷却 -20%', '多弹 2 次', '伤害 +50%'] },
-  fireball: { name: '豪火球', icon: 'fire', desc: '朝前方喷火球，爆炸留下火海', up: ['', '爆炸范围 +20%', '冷却 -20%', '火海烧得更久', '伤害 +50%'] },
-  clones: { name: '影分身', icon: 'naruto', desc: '分身在身边帮你扔手里剑', up: ['', '分身 +1', '投掷更快', '分身 +1', '分身 +1'] },
-  tags: { name: '起爆符', icon: 'tag', desc: '在脚下埋雷，怪踩上就爆', up: ['', '埋得更快', '爆炸范围 +20%', '一次埋 2 张', '伤害 +50%'] },
+  shuriken: { name: '手里剑', icon: 'shuriken', desc: '自动瞄准最近的敌人', up: ['', '数量 +1', '伤害 +30%', '数量 +1', '数量 +1，可穿透'] },
+  rasengan: { name: '螺旋丸', icon: 'orbwater', desc: '绕着身体转的查克拉球', up: ['', '数量 +1', '转圈范围变大', '数量 +1', '数量 +1，伤害 +50%'] },
+  chidori: { name: '千鸟', icon: 'bookthunder', desc: '闪电在敌人之间连锁弹跳', up: ['', '多弹 1 次', '冷却 -20%', '多弹 2 次', '伤害 +50%'] },
+  fireball: { name: '豪火球', icon: 'fireball', desc: '朝前方喷火球，爆炸留下火海', up: ['', '爆炸范围 +20%', '冷却 -20%', '火海烧得更久', '伤害 +50%'] },
+  clones: { name: '影分身', icon: 'mist', desc: '分身在身边帮你扔手里剑', up: ['', '分身 +1', '投掷更快', '分身 +1', '分身 +1'] },
+  tags: { name: '起爆符', icon: 'explosion', desc: '在脚下埋雷，怪踩上就爆', up: ['', '埋得更快', '爆炸范围 +20%', '一次埋 2 张', '伤害 +50%'] },
 };
 const PASSIVES = {
-  haste: { name: '疾风', icon: 'leaf', desc: '所有忍术冷却 -8%' },
-  power: { name: '查克拉强化', icon: 'gem', desc: '所有伤害 +15%' },
+  haste: { name: '疾风', icon: 'bookwind', desc: '所有忍术冷却 -8%' },
+  power: { name: '查克拉强化', icon: 'attackupgrade', desc: '所有伤害 +15%' },
   swift: { name: '瞬身术', icon: 'boot', desc: '移动速度 +8%' },
-  body: { name: '仙人体质', icon: 'heart', desc: '最大生命 +20 并回满' },
+  body: { name: '仙人体质', icon: 'heal', desc: '最大生命 +20 并回满' },
   pact: { name: '通灵契约', icon: 'scroll', desc: '吸取范围 +30%，攻击范围 +10%' },
 };
 // 忍术满级 + 搭档（忍术也要满级，被动有就行）→ 进化
 const EVOS = [
-  { from: 'shuriken', need: 'rasengan', name: '风遁·螺旋手里剑', icon: 'rsk', desc: '手里剑 + 螺旋丸满级：飞出去炸一大片' },
-  { from: 'chidori', need: 'haste', name: '雷切', icon: 'bolt', desc: '千鸟满级 + 疾风：一次两道闪电，各弹 12 次' },
-  { from: 'fireball', need: 'power', name: '豪火灭却', icon: 'fire', desc: '豪火球满级 + 查克拉强化：一次喷 5 发' },
+  { from: 'shuriken', need: 'rasengan', name: '风遁·螺旋手里剑', icon: 'orblight', desc: '手里剑 + 螺旋丸满级：飞出去炸一大片' },
+  { from: 'chidori', need: 'haste', name: '雷切', icon: 'bookthunder', desc: '千鸟满级 + 疾风：一次两道闪电，各弹 12 次' },
+  { from: 'fireball', need: 'power', name: '豪火灭却', icon: 'orbfire', desc: '豪火球满级 + 查克拉强化：一次喷 5 发' },
 ];
 
 const lvOf = id => P.w[id]?.lv || 0;
@@ -327,12 +170,12 @@ function apply(c) {
 // ===== 游戏状态 =====
 const BOSSES = ['迪达拉', '干柿鬼鲛', '角都', '飞段', '佩恩']; // 每 2 分钟按顺序登场
 let best = +localStorage.getItem('ninjabonk_best') || 0;
-let state = 'menu', CH = CHARS[0], P, foes, bullets, shots, gems, items, fires, mines, warns, zones, fx, pops;
+let state = 'loading', CH = CHARS[0], P, foes, bullets, shots, gems, items, fires, mines, warns, zones, fx, pops;
 let t, kills, spawnCD, lvl, xp, xpNeed, choices, shake, newBest, bossN, nextRing, ringN, banner;
 
 function start(i) {
   CH = CHARS[i];
-  P = { x: 0, y: 0, r: 16, hp: CH.hp, maxHp: CH.hp, hurt: 0, face: 1, moving: false, dirX: 1, dirY: 0, kx: 0, ky: 0,
+  P = { x: 0, y: 0, r: 16, hp: CH.hp, maxHp: CH.hp, hurt: 0, face: 1, moving: false, dirX: 0, dirY: 1, kx: 0, ky: 0,
         rage: 0, rageMax: 150, ult: 0, w: { [CH.start]: { lv: 1, cd: 0 } }, p: {} };
   foes = []; bullets = []; shots = []; gems = []; items = []; fires = []; mines = []; warns = []; zones = []; fx = []; pops = [];
   t = 0; kills = 0; spawnCD = 0; lvl = 1; xp = 0; xpNeed = 3; shake = 0; bossN = 0; nextRing = 100; ringN = 0;
@@ -341,14 +184,22 @@ function start(i) {
 }
 function pick(i) { if (choices[i]) { apply(choices[i]); state = 'play'; } }
 
+// 播一个 pixelfx 特效（序列帧放完自动消失）
+function play(key, x, y, { scale = 1, rot = 0, speed = 1, center = false } = {}) {
+  if (fx.length > 220) return; // 同屏特效太多就不播了
+  const m = FXMETA[key], max = m.n / m.fps / speed;
+  fx.push({ key, x, y, scale, rot, speed, center, life: max, max });
+}
+
 // 大招：清掉屏幕上的怪，之后 6 秒无敌 + 加速 + 身边灼烧光环
 function ult() {
   if (P.rage < P.rageMax || P.ult > 0) return;
   P.rage = 0; P.rageMax += 75; P.ult = 6; shake = 12; // 每放一次，下次要攒更久
   banner = { text: CH.ult + '！', life: 1.8 };
-  if (CH.id === 'sakura') P.hp = P.maxHp;
+  if (CH.id === 'sakura') { P.hp = P.maxHp; play('heal', P.x, P.y + P.r, { scale: 2 }); }
   for (const f of foes) if (Math.abs(f.x - P.x) < VW / 2 && Math.abs(f.y - P.y) < VH / 2) hitFoe(f, 60 * DMG(), f.x - P.x, f.y - P.y);
-  fx.push({ type: 'ring', x: P.x, y: P.y, r: Math.max(VW, VH) / 2, life: 0.5, max: 0.5, color: CH.color });
+  play('mana', P.x, P.y + P.r, { scale: 2 });
+  fx.push({ flash: CH.color, life: 0.4, max: 0.4 });
 }
 
 // ===== 输入：键盘 + 按住拖动摇杆 =====
@@ -368,8 +219,8 @@ cv.addEventListener('pointerdown', e => {
   if (state === 'menu') charRects().forEach((r, i) => inR(e, r) && start(i));
   else if (state === 'over') state = 'menu';
   else if (state === 'level') cardRects().forEach((r, i) => inR(e, r) && pick(i));
-  else if (P.rage >= P.rageMax && inR(e, ultRect())) ult();
-  else joy = { x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY };
+  else if (state === 'play' && P.rage >= P.rageMax && inR(e, ultRect())) ult();
+  else if (state === 'play') joy = { x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY };
 });
 addEventListener('pointermove', e => { if (joy) { joy.x = e.clientX; joy.y = e.clientY; } });
 addEventListener('pointerup', () => joy = null);
@@ -393,6 +244,7 @@ function hitFoe(f, dmg, kx, ky) {
   if (pops.length < 150) pops.push({ x: f.x, y: f.y - f.r * 2, text: Math.round(dmg), life: 0.6 });
   if (f.hp > 0) return;
   kills++;
+  play('poof', f.x, f.y + f.r, { scale: f.r > 25 ? 2 : 1, speed: 2 });
   if (!(P.ult > 0)) P.rage = Math.min(P.rageMax, P.rage + f.rage);
   gems.push({ x: f.x, y: f.y, v: { boss: 30, big: 5, sound: 2 }[f.kind] || 1 });
   const r = Math.random();
@@ -400,19 +252,20 @@ function hitFoe(f, dmg, kx, ky) {
   else if (r < 0.012) items.push({ x: f.x, y: f.y, kind: 'ramen' });
   else if (r < 0.018) items.push({ x: f.x, y: f.y, kind: 'scroll' });
 }
-// 范围爆炸，伤所有怪
-function boom(x, y, r, dmg, color = '255,150,40') {
+// 范围爆炸，伤所有怪；look = 用哪个 pixelfx 特效
+function boom(x, y, r, dmg, look = 'pow') {
   for (const f of foes) if (f.hp > 0 && (f.x - x) ** 2 + (f.y - y) ** 2 < (r + f.r) ** 2) hitFoe(f, dmg, f.x - x, f.y - y);
-  fx.push({ type: 'ring', x, y, r, life: 0.35, max: 0.35, color });
+  play(look, x, y);
 }
 function hurt(dmg) {
   if (P.hurt > 0 || P.ult > 0) return;
   P.hp -= dmg; P.hurt = 0.7; shake = 10;
+  play('hitspark', P.x, P.y);
 }
 // 敌人那边的爆炸：伤主角，也顺带炸伤周围的怪
 function blast(x, y, r, dmg) {
   if (dist2(P, { x, y }) < (r + P.r) ** 2) hurt(dmg);
-  boom(x, y, r, dmg, '255,90,40');
+  boom(x, y, r, dmg, 'blast');
 }
 function throwStar(x, y, dmg, n = 1, pierce = 0) {
   const f = nearest(x, y, 600);
@@ -437,7 +290,7 @@ const TICK = {
       if (!f) return;
       const a = Math.atan2(f.y - P.y, f.x - P.x), r = 130 * AREA(), dmg = 60 * DMG();
       bullets.push({ kind: 'rsk', x: P.x, y: P.y, vx: Math.cos(a) * 380, vy: Math.sin(a) * 380, r: 22, life: 1.4, hit: new Set(),
-                     boom: b => boom(b.x, b.y, r, dmg, '200,240,255') });
+                     boom: b => boom(b.x, b.y, r, dmg, 'plasma') });
       return;
     }
     w.cd = [0.6, 0.6, 0.55, 0.5, 0.45][w.lv - 1] * CD();
@@ -464,9 +317,10 @@ const TICK = {
         const f = nearest(x, y, range, seen);
         if (!f) break;
         seen.add(f); hitFoe(f, dmg, f.x - x, f.y - y);
+        play('zap', f.x, f.y, { rot: Math.atan2(f.y - y, f.x - x) }); // 电弧从上一个目标打过来
         pts.push([f.x, f.y]); x = f.x; y = f.y; range = 220;
       }
-      if (pts.length > 1) fx.push({ type: 'bolt', pts, life: 0.25, max: 0.25 });
+      if (pts.length > 1) fx.push({ bolt: pts, life: 0.25, max: 0.25 });
     }
   },
   fireball(w, dt) {
@@ -502,9 +356,9 @@ const TICK = {
 const BOSS_SKILL = {
   '迪达拉': f => { const a = Math.atan2(P.y - f.y, P.x - f.x); for (let i = -1; i <= 1; i++) shoot(f.x, f.y - 30, a + i * 0.6, 170, 'bird', 15, 4); },
   '干柿鬼鲛': f => { const a = Math.atan2(P.y - f.y, P.x - f.x); for (let i = -2; i <= 2; i++) shoot(f.x, f.y, a + i * 0.22, 300, 'shark', 15); },
-  '角都': () => { for (let i = 0; i < 5; i++) warns.push({ x: P.x + rand(-90, 90), y: P.y + rand(-90, 90), r: 45, delay: 0.9 + i * 0.12, max: 0.9 + i * 0.12, dmg: 18, color: '60,50,80' }); },
+  '角都': () => { for (let i = 0; i < 5; i++) warns.push({ x: P.x + rand(-90, 90), y: P.y + rand(-90, 90), r: 45, delay: 0.9 + i * 0.12, max: 0.9 + i * 0.12, dmg: 18, color: '60,50,80', look: 'hands' }); },
   '飞段': () => { zones.push({ x: P.x, y: P.y, r: 95, life: 5, dps: 8 }); },
-  '佩恩': f => { warns.push({ x: f.x, y: f.y, r: 230, delay: 1.1, max: 1.1, dmg: 15, push: true, color: '150,110,255' }); },
+  '佩恩': f => { warns.push({ x: f.x, y: f.y, r: 230, delay: 1.1, max: 1.1, dmg: 15, push: true, color: '150,110,255', look: 'mana' }); },
 };
 
 const FOES = { // 血量倍率、半径、速度、碰撞伤害、攒大招能量
@@ -598,6 +452,7 @@ function update(dt) {
         if ((f.fuse -= dt) <= 0) { f.dead = true; blast(f.x, f.y, 75, 20); }
       } else if (d < 50) f.fuse = 0.6;
     }
+    f.moving = sp > 0;
     f.x += ux * sp * dt; f.y += uy * sp * dt;
     if (f.kind !== 'bomb') f.hit -= dt;
     if (d < f.r + P.r && f.dmg) hurt(f.dmg);
@@ -655,7 +510,7 @@ function update(dt) {
       const fd = Math.hypot(f.x - w.x, f.y - w.y) || 1;
       f.x += (f.x - w.x) / fd * 150; f.y += (f.y - w.y) / fd * 150;
     }
-    fx.push({ type: 'ring', x: w.x, y: w.y, r: w.r, life: 0.3, max: 0.3, color: w.color });
+    play(w.look, w.x, w.y + (w.push ? 40 : 20), { scale: w.push ? 2 : 0.5 });
   }
   warns = warns.filter(w => w.delay > 0);
   // 飞段的诅咒阵：站在里面持续掉血
@@ -674,9 +529,9 @@ function update(dt) {
   // 掉落：拉面回血、卷轴吸经验、宝箱白送一次升级（能进化优先进化）
   for (const it of items) if (dist2(it, P) < (P.r + 18) ** 2) {
     it.taken = true;
-    if (it.kind === 'ramen') { P.hp = Math.min(P.maxHp, P.hp + 30); pops.push({ x: P.x, y: P.y - 50, text: '+30', life: 1, color: '#7dff8a' }); }
-    else if (it.kind === 'scroll') for (const g of gems) g.pull = g.fast = true;
-    else { const c = makeChoices()[0]; banner = { text: '宝箱：' + cardInfo(c).name, life: 2 }; apply(c); }
+    if (it.kind === 'ramen') { P.hp = Math.min(P.maxHp, P.hp + 30); pops.push({ x: P.x, y: P.y - 50, text: '+30', life: 1, color: '#7dff8a' }); play('heal', P.x, P.y + P.r); }
+    else if (it.kind === 'scroll') { for (const g of gems) g.pull = g.fast = true; play('collect', P.x, P.y + P.r); }
+    else { const c = makeChoices()[0]; banner = { text: '宝箱：' + cardInfo(c).name, life: 2 }; apply(c); play('collect', P.x, P.y + P.r, { scale: 2 }); }
   }
   items = items.filter(i => !i.taken);
   if (xp >= xpNeed) {
@@ -698,44 +553,71 @@ function update(dt) {
 }
 
 // ===== 绘制 =====
+let K = 1, camX = 0, camY = 0; // K = 世界单位 → 设备像素
+const snap = v => Math.round(v * K) / K; // 对齐到屏幕像素，像素画不糊不抖
 function circle(x, y, r) { ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill(); }
+// 像素字体只在 12 的整数倍字号下清楚；描边用四向偏移 1 个字体像素
 function text(s, x, y, size, color = '#fff', align = 'center') {
-  ctx.font = `bold ${size}px ${FONT}`; ctx.textAlign = align; ctx.textBaseline = 'middle';
-  ctx.lineJoin = 'round'; ctx.lineWidth = size / 5; ctx.strokeStyle = 'rgba(0,0,0,.6)';
-  ctx.strokeText(s, x, y); ctx.fillStyle = color; ctx.fillText(s, x, y);
+  const fs = Math.max(12, Math.round(size / 12) * 12), o = fs / 12;
+  ctx.font = `${fs}px ${FONT}`; ctx.textAlign = align; ctx.textBaseline = 'middle';
+  x = Math.round(x); y = Math.round(y);
+  ctx.fillStyle = '#141b1b';
+  for (const [dx, dy] of [[-o, 0], [o, 0], [0, -o], [0, o]]) ctx.fillText(s, x + dx, y + dy);
+  ctx.fillStyle = color; ctx.fillText(s, x, y);
 }
 function bar(x, y, w, h, frac, color) {
-  ctx.fillStyle = 'rgba(0,0,0,.45)'; ctx.beginPath(); ctx.roundRect(x, y, w, h, h / 2); ctx.fill();
-  if (frac > 0) { ctx.fillStyle = color; ctx.beginPath(); ctx.roundRect(x, y, Math.max(h, w * Math.min(1, frac)), h, h / 2); ctx.fill(); }
+  ctx.fillStyle = '#141b1b'; ctx.fillRect(x - 2, y - 2, w + 4, h + 4);
+  ctx.fillStyle = '#3a3f4a'; ctx.fillRect(x, y, w, h);
+  ctx.fillStyle = color; ctx.fillRect(x, y, Math.round(w * Math.max(0, Math.min(1, frac))), h);
 }
 function card(r, stroke) {
-  ctx.fillStyle = '#262a35'; ctx.beginPath(); ctx.roundRect(r.x, r.y, r.w, r.h, 12); ctx.fill();
-  ctx.strokeStyle = stroke; ctx.lineWidth = 2; ctx.stroke();
+  ctx.fillStyle = '#141b1b'; ctx.fillRect(r.x - 3, r.y - 3, r.w + 6, r.h + 6);
+  ctx.fillStyle = stroke; ctx.fillRect(r.x - 1, r.y - 1, r.w + 2, r.h + 2);
+  ctx.fillStyle = '#262a35'; ctx.fillRect(r.x + 2, r.y + 2, r.w - 4, r.h - 4);
 }
-// 以 (x, y) 为中心画精灵
-function spr(s, x, y, size = s.size, rot = 0, flip = false, hit = false) {
-  const w = size * s.aspect;
-  ctx.save(); ctx.translate(x, y);
-  if (rot) ctx.rotate(rot);
-  if (flip) ctx.scale(-1, 1);
-  ctx.drawImage(hit ? s.hit : s, -w / 2, -size / 2, w, size);
-  ctx.restore();
-}
-const stack = (n, h) => { const w = Math.min(340, W - 40), gap = 12; return Array.from({ length: n }, (_, i) => ({ x: (W - w) / 2, y: H / 2 - (h * n + gap * (n - 1)) / 2 + i * (h + gap), w, h })); };
+const icon = (key, cx, cy, size) => ctx.drawImage(IMG['icons/' + key] || IMG['sprites/' + key], Math.round(cx - size / 2), Math.round(cy - size / 2), size, size);
+const stack = (n, h) => { const w = Math.min(340, W - 40), gap = 14; return Array.from({ length: n }, (_, i) => ({ x: Math.round((W - w) / 2), y: Math.round(H / 2 - (h * n + gap * (n - 1)) / 2 + i * (h + gap)), w, h })); };
 const cardRects = () => stack(choices.length, 84);
-const charRects = () => stack(3, 76).map(r => ({ ...r, y: r.y + 30 }));
-const ultRect = () => ({ x: W / 2 - 110, y: H - 52, w: 220, h: 44 });
+const charRects = () => stack(3, 84).map(r => ({ ...r, y: r.y + 30 }));
+const ultRect = () => ({ x: Math.round(W / 2 - 110), y: H - 52, w: 220, h: 44 });
+
+// 精灵表画第 f 帧，(x, y) 是中心
+function frame(s, f, x, y, k, rot = 0, flip = false, flash = false) {
+  const w = s.fw * k, h = s.fh * k, sx = (f % s.cols) * s.fw, sy = Math.floor(f / s.cols) * s.fh, img = flash ? s.flash : s.c;
+  if (!rot && !flip) return ctx.drawImage(img, sx, sy, s.fw, s.fh, snap(x - w / 2), snap(y - h / 2), w, h);
+  ctx.save(); ctx.translate(snap(x), snap(y)); if (rot) ctx.rotate(rot); if (flip) ctx.scale(-1, 1);
+  ctx.drawImage(img, sx, sy, s.fw, s.fh, -w / 2, -h / 2, w, h); ctx.restore();
+}
+// 角色表：4 列朝向（下 上 左 右）× 若干行动作，前 4 行是走路；(x, y) 是脚底
+const dirOf = (dx, dy) => Math.abs(dx) > Math.abs(dy) ? (dx < 0 ? 2 : 3) : (dy < 0 ? 1 : 0);
+function actor(s, dir, row, x, y, k, flash) {
+  const w = s.fw * k, h = s.fh * k;
+  ctx.drawImage(flash ? s.flash : s.c, dir * s.fw, row * s.fh, s.fw, s.fh, snap(x - w / 2), snap(y - h), w, h);
+}
+// pixelfx 序列帧：默认对准它自己的落点（pivot），center 时对准帧中心
+function drawFx(key, f, x, y, scale = 1, rot = 0, center = false) {
+  const m = FXMETA[key], k = FXP * scale, sx = (f % m.cols) * m.w, sy = Math.floor(f / m.cols) * m.h;
+  const ax = center ? m.w / 2 : m.pivot[0], ay = center ? m.h / 2 : m.pivot[1];
+  ctx.save(); ctx.translate(snap(x), snap(y)); if (rot) ctx.rotate(rot);
+  ctx.drawImage(IMG['fx/' + key], sx, sy, m.w, m.h, -ax * k, -ay * k, m.w * k, m.h * k); ctx.restore();
+}
+const loopFrame = (key, time) => { const m = FXMETA[key]; return Math.floor(time * m.fps) % m.n; };
+// 像素风闪电：沿折线一格一格盖方块
+function pixLine(x0, y0, x1, y1, size) {
+  const n = Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0) / size));
+  for (let i = 0; i <= n; i++) ctx.fillRect(snap(x0 + (x1 - x0) * i / n - size / 2), snap(y0 + (y1 - y0) * i / n - size / 2), size, size);
+}
 
 function camera(cx, cy, sh = 0) {
-  ctx.setTransform(DPR * S, 0, 0, DPR * S, DPR * (W / 2 + rand(-sh, sh)), DPR * (H / 2 + rand(-sh, sh)));
-  ctx.translate(-cx, -cy);
+  K = DPR * S; camX = cx; camY = cy;
+  ctx.setTransform(K, 0, 0, K, Math.round(DPR * (W / 2 + rand(-sh, sh)) - cx * K), Math.round(DPR * (H / 2 + rand(-sh, sh)) - cy * K));
 }
 function drawGround(cx, cy) {
-  const T = 256, x0 = Math.floor((cx - VW / 2) / T) * T, y0 = Math.floor((cy - VH / 2) / T) * T;
-  for (let x = x0; x < cx + VW / 2; x += T) for (let y = y0; y < cy + VH / 2; y += T) ctx.drawImage(ART.ground, x, y, T + 1, T + 1);
+  const T = ART.ground.width * PX, x0 = Math.floor((cx - VW / 2) / T) * T, y0 = Math.floor((cy - VH / 2) / T) * T;
+  for (let x = x0; x < cx + VW / 2; x += T) for (let y = y0; y < cy + VH / 2; y += T) ctx.drawImage(ART.ground, x, y, T, T);
 }
 
-const SIZE = { zetsu: 48, big: 90, sound: 50, dog: 40, bomb: 50, boss: 120 };
+const SCALE = { zetsu: PX, big: PX * 2, sound: PX, dog: PX, bomb: PX, boss: PX * 2 };
 function drawWorld() {
   camera(P.x, P.y, shake);
   drawGround(P.x, P.y);
@@ -747,10 +629,12 @@ function drawWorld() {
     for (let i = 0; i <= 3; i++) { const a = Math.PI / 2 + i * TAU / 3; ctx[i ? 'lineTo' : 'moveTo'](z.x + Math.cos(a) * z.r, z.y + Math.sin(a) * z.r); }
     ctx.stroke();
   }
-  for (const z of fires) {
-    const a = Math.min(1, z.life) * (0.5 + 0.1 * Math.sin(t * 20 + z.x)), g = ctx.createRadialGradient(z.x, z.y, 0, z.x, z.y, z.r);
-    g.addColorStop(0, `rgba(255,220,90,${a})`); g.addColorStop(0.6, `rgba(255,110,30,${a * 0.7})`); g.addColorStop(1, 'rgba(255,60,20,0)');
-    ctx.fillStyle = g; circle(z.x, z.y, z.r);
+  for (const z of fires) { // 火海：一圈像素火苗
+    ctx.fillStyle = 'rgba(255,120,40,.16)'; circle(z.x, z.y, z.r);
+    for (let i = 0; i < 6; i++) {
+      const a = i * TAU / 5, rr = i ? z.r * 0.55 : 0;
+      frame(ART.flame, Math.floor(t * 12 + i * 3) % 8, z.x + Math.cos(a) * rr, z.y + Math.sin(a) * rr - 20, FXP);
+    }
   }
   for (const w of warns) { // 预警圈：从中心往外长，长满就判定
     const k = 1 - w.delay / w.max;
@@ -765,108 +649,113 @@ function drawWorld() {
     ctx.strokeStyle = '#ff2a2a'; ctx.lineWidth = 3; ctx.setLineDash([14, 8]); ctx.strokeRect(0, -f.r, 300, f.r * 2);
     ctx.restore(); // restore 也会清掉虚线
   }
-  if (P.ult > 0) { // 大招光环
-    const g = ctx.createRadialGradient(P.x, P.y, 20, P.x, P.y, 150);
-    g.addColorStop(0, `rgba(${CH.color},${0.45 + 0.15 * Math.sin(t * 15)})`); g.addColorStop(1, `rgba(${CH.color},0)`);
-    ctx.fillStyle = g; circle(P.x, P.y, 150);
-  }
-  for (const g of gems) spr(g.v >= 30 ? ART.gold : ART.gem, g.x, g.y + Math.sin(t * 5 + g.x) * 2, g.v >= 30 ? 32 : g.v > 1 ? 22 : 15);
-  for (const it of items) spr(ART[it.kind], it.x, it.y - 6 + Math.sin(t * 4 + it.x) * 3);
-  for (const m of mines) spr(ART.tag, m.x, m.y, 24, 0.2);
+  if (P.ult > 0) { ctx.fillStyle = `rgba(${CH.color},${0.18 + 0.08 * Math.sin(t * 15)})`; circle(P.x, P.y, 140); } // 大招光环范围
+  for (const g of gems) frame(g.v >= 30 ? ART.gold : g.v > 1 ? ART.gemBig : ART.gem, 0, g.x, g.y + Math.round(Math.sin(t * 5 + g.x)) * FXP, g.v >= 30 ? FXP : FXP / 2);
+  for (const it of items) frame(ART[it.kind], 0, it.x, it.y - 6 + Math.round(Math.sin(t * 4 + it.x)) * PX, PX);
+  for (const m of mines) frame(ART.dynamite, 0, m.x, m.y, FXP);
 
-  // —— 角色：按 y 排序，下面的挡住上面的；先统一画影子 ——
-  const cw = P.w.clones;
-  if (cw?.pos) {
-    ctx.globalAlpha = 0.55;
-    for (const [x, y] of cw.pos) spr(ART[CH.id], x, y - 9, 46, Math.sin(t * 12) * 0.07, P.face < 0);
-    ctx.globalAlpha = 1;
-  }
-  const actors = foes.concat(P).sort((a, b) => a.y - b.y);
-  ctx.fillStyle = 'rgba(0,0,0,.2)'; ctx.beginPath();
-  for (const a of actors) { ctx.moveTo(a.x + a.r, a.y + a.r * 0.9); ctx.ellipse(a.x, a.y + a.r * 0.9, a.r, a.r * 0.38, 0, 0, TAU); }
+  // —— 怪按 y 排序，下面的挡住上面的；先统一画影子 ——
+  const cw = P.w.clones, pdir = dirOf(P.dirX, P.dirY), prow = P.moving ? Math.floor(t * 8) % 4 : 0;
+  if (cw?.pos) { ctx.globalAlpha = 0.55; for (const [x, y] of cw.pos) actor(ART[CH.id], pdir, prow, x, y + P.r, PX); ctx.globalAlpha = 1; }
+  const actors = foes.slice().sort((a, b) => a.y - b.y);
+  ctx.fillStyle = 'rgba(0,0,0,.22)'; ctx.beginPath();
+  for (const a of actors.concat(P)) { ctx.moveTo(a.x + a.r, a.y + a.r * 0.9); ctx.ellipse(a.x, a.y + a.r * 0.9, a.r, a.r * 0.38, 0, 0, TAU); }
   ctx.fill();
   for (const a of actors) {
-    let s, size, ph;
-    if (a === P) {
-      if (P.hurt > 0 && Math.floor(t * 20) % 2) continue; // 受伤闪烁
-      s = ART[CH.id]; size = 52; ph = P.moving ? t * 14 : 0;
+    if (a.kind === 'dog') { // 动物只有侧面两帧，画的是朝右
+      frame(ART.dog, Math.floor(t * 10 + a.ph) % 2, a.x, a.y + a.r - 8 * PX, PX, 0, P.x < a.x, a.hit > 0.1);
     } else {
-      s = a.kind === 'boss' ? ART[a.name] : ART[{ big: 'zetsu', bomb: 'bomber' }[a.kind] || a.kind];
-      size = SIZE[a.kind]; ph = t * (size > 80 ? 6 : 10) + a.ph;
+      const s = a.kind === 'boss' ? ART[a.name] : ART[a.kind === 'big' ? 'zetsu' : a.kind];
+      actor(s, dirOf(P.x - a.x, P.y - a.y), a.moving ? Math.floor(t * 8 + a.ph) % 4 : 0, a.x, a.y + a.r, SCALE[a.kind], a.hit > 0.1);
     }
-    const flip = a === P ? P.face < 0 : (P.x < a.x) !== !!s.left;
-    // 走路：上下颠 + 左右晃
-    spr(s, a.x, a.y - size * 0.18 - Math.abs(Math.sin(ph)) * size * 0.06, size, Math.sin(ph) * 0.07, flip, a.hit > 0.1);
   }
-  for (const f of foes) if (f.kind === 'boss') text(f.name, f.x, f.y - 96, 16, '#ff6b5b');
 
   // —— 飞行道具和特效 ——
   for (const b of bullets) {
-    if (b.kind === 'star') spr(ART.star, b.x, b.y, 22, t * 20);
-    else if (b.kind === 'rsk') spr(ART.rsk, b.x, b.y, 60, t * 25);
-    else spr(ART.fire, b.x, b.y, 28, Math.atan2(b.vy, b.vx));
+    if (b.kind === 'star') frame(ART.shuriken, Math.floor(t * 20) % 2, b.x, b.y, FXP);
+    else if (b.kind === 'rsk') { drawFx('orb', loopFrame('orb', t), b.x, b.y, 0.6, 0, true); frame(ART.rsk, Math.floor(t * 20) % 2, b.x, b.y, FXP * 2); }
+    else drawFx('fireball', loopFrame('fireball', t), b.x, b.y, 1, Math.atan2(b.vy, b.vx));
   }
-  for (const [x, y] of P.w.rasengan?.pos || []) spr(ART.orb, x, y, 48, -t * 8);
-  for (const s of shots) spr(ART[s.kind], s.x, s.y, undefined, Math.atan2(s.vy, s.vx));
+  for (const [x, y] of P.w.rasengan?.pos || []) drawFx('orb', loopFrame('orb', t + x * 0.01), x, y, 1, 0, true);
+  for (const s of shots) {
+    if (s.kind === 'kunai') frame(ART.kunai, 0, s.x, s.y, FXP, Math.atan2(s.vy, s.vx));
+    else if (s.kind === 'bird') frame(ART.bird, Math.floor(t * 8) % 2, s.x, s.y, PX, 0, s.vx < 0); // 鸟画的是朝右，两帧扇翅膀
+    else frame(ART.shark, 0, s.x, s.y, PX, 0, s.vx > 0); // 鱼只用第 1 帧（朝左），第 2 帧是跳起来的
+  }
   for (const e of fx) {
-    const k = e.life / e.max;
-    if (e.type === 'ring') { ctx.fillStyle = `rgba(${e.color},${0.45 * k})`; circle(e.x, e.y, e.r * (1.1 - 0.4 * k)); continue; }
-    // 闪电：每帧随机抖动的折线，粗的半透明 + 细的亮芯
-    ctx.globalAlpha = k; ctx.lineJoin = 'round'; ctx.beginPath(); ctx.moveTo(...e.pts[0]);
-    for (let i = 1; i < e.pts.length; i++) {
-      const [x0, y0] = e.pts[i - 1], [x1, y1] = e.pts[i];
-      ctx.lineTo((x0 + x1) / 2 + rand(-14, 14), (y0 + y1) / 2 + rand(-14, 14)); ctx.lineTo(x1, y1);
+    if (e.flash) continue;
+    if (e.bolt) { // 千鸟的电弧：每帧随机抖动的像素折线
+      const k = e.life / e.max, pts = e.bolt;
+      ctx.globalAlpha = k;
+      for (const [c, size] of [['#6cc4ff', FXP * 3], ['#f2fbff', FXP]]) {
+        ctx.fillStyle = c;
+        for (let i = 1; i < pts.length; i++) {
+          const [x0, y0] = pts[i - 1], [x1, y1] = pts[i], mx = (x0 + x1) / 2 + rand(-14, 14), my = (y0 + y1) / 2 + rand(-14, 14);
+          pixLine(x0, y0, mx, my, size); pixLine(mx, my, x1, y1, size);
+        }
+      }
+      ctx.globalAlpha = 1;
+      continue;
     }
-    ctx.strokeStyle = 'rgba(120,190,255,.5)'; ctx.lineWidth = 9; ctx.stroke();
-    ctx.strokeStyle = '#f2fbff'; ctx.lineWidth = 3; ctx.stroke();
-    ctx.globalAlpha = 1;
+    const m = FXMETA[e.key];
+    drawFx(e.key, Math.min(m.n - 1, Math.floor((e.max - e.life) * m.fps * e.speed)), e.x, e.y, e.scale, e.rot, e.center);
   }
-
-  for (const p of pops) { ctx.globalAlpha = Math.min(1, p.life / 0.6); text(p.text, p.x, p.y, 14, p.color); }
-  ctx.globalAlpha = 1;
+  if (!(P.hurt > 0 && Math.floor(t * 20) % 2)) actor(ART[CH.id], pdir, prow, P.x, P.y + P.r, PX); // 主角最后画，不被特效挡住；受伤闪烁
 }
 
+// 世界坐标 → 屏幕坐标（文字在屏幕空间画才清楚）
+const toScreen = (x, y) => [(x - camX) * S + W / 2, (y - camY) * S + H / 2];
 function drawHUD() {
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-  ctx.fillStyle = 'rgba(0,0,0,.4)'; ctx.fillRect(0, 0, W, 8);
-  ctx.fillStyle = '#4fb3ff'; ctx.fillRect(0, 0, W * xp / xpNeed, 8);
-  const bw = Math.min(150, W / 2 - 80); // 窄屏别压到中间的计时
-  spr(ART.heart, 24, 25, 24);
-  bar(40, 18, bw, 14, Math.max(0, P.hp) / P.maxHp, '#ff4d5e');
-  text(`Lv ${lvl}`, 14, 50, 16, '#fff', 'left');
-  text(fmt(t), W / 2, 30, 22);
-  text(`击败 ${kills}`, W - 12, 25, 16, '#fff', 'right');
+  for (const f of foes) if (f.kind === 'boss') { const [x, y] = toScreen(f.x, f.y - 70); text(f.name, x, y, 12, '#ff6b5b'); }
+  for (const p of pops) {
+    const [x, y] = toScreen(p.x, p.y);
+    ctx.globalAlpha = Math.min(1, p.life / 0.6); ctx.font = `12px ${FONT}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#141b1b'; ctx.fillText(p.text, Math.round(x) + 1, Math.round(y) + 1);
+    ctx.fillStyle = p.color || '#fff'; ctx.fillText(p.text, Math.round(x), Math.round(y));
+  }
+  ctx.globalAlpha = 1;
+  for (const e of fx) if (e.flash) { ctx.fillStyle = `rgba(${e.flash},${0.5 * e.life / e.max})`; ctx.fillRect(0, 0, W, H); }
+
+  ctx.fillStyle = '#141b1b'; ctx.fillRect(0, 0, W, 8);
+  ctx.fillStyle = '#4fb3ff'; ctx.fillRect(0, 0, Math.round(W * xp / xpNeed), 6);
+  const bw = Math.min(150, Math.round(W / 2 - 80)); // 窄屏别压到中间的计时
+  ctx.drawImage(IMG['sprites/heart'], 14, 18, 28, 24);
+  bar(48, 22, bw, 12, P.hp / P.maxHp, '#ff4d5e');
+  text(`Lv ${lvl}`, 14, 52, 12, '#fff', 'left');
+  text(fmt(t), W / 2, 30, 24);
+  text(`击败 ${kills}`, W - 14, 28, 12, '#fff', 'right');
 
   // 已学的忍术（★ = 已进化）和被动
   let x = 14;
   for (const id in P.w) {
     const w = P.w[id];
-    spr(ART[w.evo ? EVOS.find(e => e.from === id).icon : WEAPONS[id].icon], x + 11, 100, 24);
-    text(w.evo ? '★' : w.lv, x + 21, 110, 11, w.evo ? '#ffd23f' : '#fff');
+    icon(w.evo ? EVOS.find(e => e.from === id).icon : WEAPONS[id].icon, x + 12, 82, 24);
+    text(w.evo ? '★' : String(w.lv), x + 22, 96, 12, w.evo ? '#ffd23f' : '#fff');
     x += 30;
   }
   x += 8;
-  for (const id in P.p) { spr(ART[PASSIVES[id].icon], x + 11, 100, 20); text(P.p[id], x + 21, 110, 11); x += 28; }
+  for (const id in P.p) { icon(PASSIVES[id].icon, x + 12, 82, 24); text(String(P.p[id]), x + 22, 96, 12); x += 30; }
 
   const boss = foes.find(f => f.kind === 'boss');
   if (boss) {
     const w = Math.min(400, W - 40);
-    text(`晓 · ${boss.name}`, W / 2, 62, 15, '#ff6b5b');
-    bar((W - w) / 2, 74, w, 10, Math.max(0, boss.hp) / boss.maxHp, '#d32f2f');
+    text(`晓 · ${boss.name}`, W / 2, 60, 12, '#ff6b5b');
+    bar(Math.round((W - w) / 2), 72, w, 8, boss.hp / boss.maxHp, '#d32f2f');
   }
   if (banner.life > 0) {
     ctx.globalAlpha = Math.min(1, banner.life);
-    text(banner.text, W / 2, H * 0.3, 30, '#ff6b5b');
+    text(banner.text, W / 2, H * 0.3, 36, '#ff6b5b');
     ctx.globalAlpha = 1;
   }
 
   // 大招能量条（满了点它或按空格）
   const r = ultRect(), col = `rgb(${CH.color})`;
-  if (P.ult > 0) { bar(r.x, r.y + 18, r.w, 12, P.ult / 6, col); text(CH.ult, W / 2, r.y + 6, 14, col); }
+  if (P.ult > 0) { bar(r.x, r.y + 20, r.w, 10, P.ult / 6, col); text(CH.ult, W / 2, r.y + 4, 12, col); }
   else {
-    bar(r.x, r.y + 18, r.w, 12, P.rage / P.rageMax, P.rage >= P.rageMax ? col : 'rgba(255,255,255,.7)');
-    if (P.rage >= P.rageMax) text(`${CH.ult}！按空格 / 点这里`, W / 2, r.y + 6, 14, Math.floor(t * 4) % 2 ? '#fff' : col);
-    else text(CH.ult, W / 2, r.y + 6, 12, '#eee');
+    bar(r.x, r.y + 20, r.w, 10, P.rage / P.rageMax, P.rage >= P.rageMax ? col : '#c9cfc4');
+    if (P.rage >= P.rageMax) text(`${CH.ult}！按空格 / 点这里`, W / 2, r.y + 4, 12, Math.floor(t * 4) % 2 ? '#fff' : col);
+    else text(CH.ult, W / 2, r.y + 4, 12, '#eee');
   }
 
   if (joy) { // 虚拟摇杆
@@ -878,27 +767,28 @@ function drawHUD() {
 
 function draw() {
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-  ctx.imageSmoothingQuality = 'high';
-  ctx.fillStyle = '#74ad55'; ctx.fillRect(0, 0, W, H);
+  ctx.imageSmoothingEnabled = false;
+  ctx.fillStyle = '#74a334'; ctx.fillRect(0, 0, W, H);
+  if (state === 'loading') { text('加载中…', W / 2, H / 2, 24); return; }
 
   if (state === 'menu') {
     const now = performance.now() / 1000;
     camera(now * 20, now * 10); drawGround(now * 20, now * 10); // 背景草地慢慢飘
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
     const rs = charRects();
-    text('忍界幸存者', W / 2, rs[0].y - 62, 44, '#ffb43a');
-    text('白绝大军来袭，每 2 分钟晓组织登场', W / 2, rs[0].y - 26, 15);
+    text('忍界幸存者', W / 2, rs[0].y - 66, 48, '#ffb43a');
+    text('白绝大军来袭，每 2 分钟晓组织登场', W / 2, rs[0].y - 28, 12);
     rs.forEach((r, i) => {
-      const c = CHARS[i], col = `rgb(${c.color})`;
+      const c = CHARS[i], col = `rgb(${c.color})`, s = ART[c.id];
       card(r, col);
-      spr(ART[c.id], r.x + 42, r.y + r.h / 2 - Math.abs(Math.sin(now * 5 + i)) * 4, 62);
-      text(`${i + 1}. ${c.name}`, r.x + 84, r.y + 22, 18, col, 'left');
-      text(c.desc, r.x + 84, r.y + 45, 12, '#fff', 'left');
-      text(`大招：${c.ult}`, r.x + 84, r.y + 63, 11, '#ccc', 'left');
+      ctx.drawImage(s.c, 0, (Math.floor(now * 6 + i) % 4) * 16, 16, 16, r.x + 12, r.y + 10, 64, 64); // 原地踏步
+      text(`${i + 1}. ${c.name}`, r.x + 88, r.y + 22, 24, col, 'left');
+      text(c.desc, r.x + 88, r.y + 50, 12, '#fff', 'left');
+      text(`大招：${c.ult}`, r.x + 88, r.y + 68, 12, '#c9cfc4', 'left');
     });
     const y = rs[2].y + rs[2].h;
-    text('点角色开始 · WASD / 方向键移动 · 手机按住拖动', W / 2, y + 26, 13, '#eee');
-    if (best) text(`最高纪录 ${fmt(best)}`, W / 2, y + 52, 15, '#ffe08a');
+    text('点角色开始 · WASD / 方向键移动 · 手机按住拖动', W / 2, y + 28, 12, '#fff');
+    if (best) text(`最高纪录 ${fmt(best)}`, W / 2, y + 52, 12, '#ffe08a');
     return;
   }
 
@@ -912,28 +802,36 @@ function draw() {
     rs.forEach((r, i) => {
       const c = cardInfo(choices[i]);
       card(r, c.gold ? '#ffd23f' : '#ff9a2e');
-      spr(ART[c.icon], r.x + 44, r.y + r.h / 2, 46);
-      text(`${i + 1}. ${c.name}`, r.x + 84, r.y + 31, 17, c.gold ? '#ffd23f' : '#ffb43a', 'left');
-      text(c.desc, r.x + 84, r.y + 57, 12, '#fff', 'left');
+      icon(c.icon, r.x + 42, r.y + r.h / 2, 48);
+      text(`${i + 1}. ${c.name}`, r.x + 80, r.y + 30, c.name.length > 9 ? 12 : 24, c.gold ? '#ffd23f' : '#ffb43a', 'left');
+      text(c.desc, r.x + 80, r.y + 60, 12, '#fff', 'left');
     });
   } else if (state === 'over') {
     ctx.fillStyle = 'rgba(0,0,0,.6)'; ctx.fillRect(0, 0, W, H);
-    text('你倒下了', W / 2, H / 2 - 60, 40, '#ff6b5b');
-    text(`${CH.name} · 存活 ${fmt(t)} · 击败 ${kills} · Lv ${lvl}`, W / 2, H / 2, 17);
-    text(newBest ? '新纪录！' : `最高纪录 ${fmt(best)}`, W / 2, H / 2 + 35, 16, '#ffe08a');
-    text('点击或按空格回到选人', W / 2, H / 2 + 85, 18);
+    text('你倒下了', W / 2, H / 2 - 60, 48, '#ff6b5b');
+    text(`${CH.name} · 存活 ${fmt(t)} · 击败 ${kills} · Lv ${lvl}`, W / 2, H / 2, 12);
+    text(newBest ? '新纪录！' : `最高纪录 ${fmt(best)}`, W / 2, H / 2 + 30, 12, '#ffe08a');
+    text('点击或按空格回到选人', W / 2, H / 2 + 80, 24);
   }
 }
 
 // ===== 主循环 =====
 let last = performance.now();
-function frame(now) {
+function loop(now) {
   const dt = Math.min(0.05, (now - last) / 1000); last = now;
   if (state === 'play') update(dt);
   draw();
-  requestAnimationFrame(frame);
+  requestAnimationFrame(loop);
 }
-requestAnimationFrame(frame);
+// 先把图片、字体都加载好、换好色，再开始
+(async () => {
+  if (!window.ASSETS) return document.body.textContent = '缺少 assets.js，请和 ninja-bonk.html 放在同一个文件夹';
+  requestAnimationFrame(loop);
+  await Promise.all(Object.keys(ASSETS).filter(k => k.startsWith('sprites/') || k.startsWith('icons/') || k.startsWith('fx/')).map(async k => IMG[k] = await loadImg(k)));
+  document.fonts.add(await new FontFace(FONT, `url(${ASSETS['font/fusion-pixel-12px-zh_hans']})`).load());
+  buildArt();
+  state = 'menu';
+})();
 </script>
 </body>
 </html>
