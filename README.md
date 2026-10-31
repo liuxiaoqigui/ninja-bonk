@@ -2,6 +2,8 @@
 
 火影忍者主题的像素风幸存者小游戏（Vampire Survivors / Megabonk 那一类），浏览器打开就能玩，不用安装。
 
+**在线玩：<https://liuxiaoqigui.github.io/ninja-bonk/>**（手机浏览器也行）
+
 ![游戏截图](docs/screenshot.png)
 
 ## 怎么玩
